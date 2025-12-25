@@ -1,0 +1,150 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() { return request.auth != null; }
+
+    function isRoomMember(roomId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.auth.uid));
+    }
+
+    match /rooms/{roomId} {
+      allow get: if resource.data.visibility == "public"
+        || (isSignedIn() && resource.data.createdByUid == request.auth.uid)
+        || isRoomMember(roomId);
+
+      allow list: if resource.data.visibility == "public";
+
+      allow create: if isSignedIn()
+        && request.resource.data.visibility in ["public", "private"]
+        && request.resource.data.code is string
+        && request.resource.data.code.size() == 6
+        && request.resource.data.createdAtMs is int
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.mapPackId in ["london-classic", "namma-bengaluru"]
+        && request.resource.data.mrXBlackTickets is int
+        && request.resource.data.mrXDoubleTickets is int
+        && request.resource.data.state == "lobby";
+
+      // Host transfer OR Start game (must include game creation in same transaction via existsAfter). [web:106]
+      allow update: if isSignedIn()
+        && resource.data.createdByUid == request.auth.uid
+        && (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(["createdByUid"])
+          ||
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(["state", "gameId", "startedAtMs"])
+            && resource.data.state == "lobby"
+            && request.resource.data.state == "started"
+            && request.resource.data.gameId == roomId
+            && request.resource.data.startedAtMs is int
+            && existsAfter(/databases/$(database)/documents/games/$(roomId))
+          )
+        );
+
+      allow delete: if false;
+
+      match /players/{uid} {
+        allow read: if isRoomMember(roomId) || (isSignedIn() && request.auth.uid == uid);
+
+        allow create, update: if isSignedIn()
+          && request.auth.uid == uid
+          && request.resource.data.uid == uid
+          && request.resource.data.nickname is string
+          && request.resource.data.nickname.size() >= 2
+          && request.resource.data.nickname.size() <= 18
+          && request.resource.data.nicknameKey is string
+          && request.resource.data.nicknameKey.size() >= 2
+          && request.resource.data.nicknameKey.size() <= 40
+          && request.resource.data.joinedAtMs is int;
+
+        allow delete: if isSignedIn() && (request.auth.uid == uid || resource.data.createdByUid == request.auth.uid);
+      }
+
+      match /nicknameClaims/{nickKey} {
+        allow get: if isSignedIn();
+        allow list: if false;
+
+        allow create: if isSignedIn()
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.nicknameKey == nickKey
+          && request.resource.data.nickname is string
+          && request.resource.data.nickname.size() >= 2
+          && request.resource.data.nickname.size() <= 18
+          && request.resource.data.createdAtMs is int;
+
+        allow update: if isSignedIn()
+          && resource.data.uid == request.auth.uid
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.nicknameKey == nickKey
+          && request.resource.data.nickname is string
+          && request.resource.data.nickname.size() >= 2
+          && request.resource.data.nickname.size() <= 18
+          && request.resource.data.createdAtMs is int;
+
+        allow delete: if isSignedIn() && (resource.data.uid == request.auth.uid || get(/databases/$(database)/documents/rooms/$(roomId)).data.createdByUid == request.auth.uid);
+      }
+    }
+
+    match /games/{gameId} {
+      allow get: if isRoomMember(gameId) || (isSignedIn() && get(/databases/$(database)/documents/rooms/$(gameId)).data.createdByUid == request.auth.uid);
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && get(/databases/$(database)/documents/rooms/$(gameId)).data.createdByUid == request.auth.uid
+        && request.resource.data.id == gameId
+        && request.resource.data.roomId == gameId
+        && request.resource.data.startedByUid == request.auth.uid
+        && request.resource.data.createdAtMs is int
+        && request.resource.data.status in ["active", "finished"]
+        && request.resource.data.mapPackId in ["london-classic", "namma-bengaluru"]
+        && request.resource.data.mrXBlackTickets is int
+        && request.resource.data.mrXDoubleTickets is int
+        && request.resource.data.mrXUid is string
+        && exists(/databases/$(database)/documents/rooms/$(gameId)/players/$(request.resource.data.mrXUid))
+        && request.resource.data.detectiveUids is list
+        && request.resource.data.detectiveUids.size() >= 1
+        && request.resource.data.detectiveUids.size() <= 5
+        // validate first 5 detective entries if present (no loops in rules). [web:106]
+        && (request.resource.data.detectiveUids.size() < 1 || (request.resource.data.detectiveUids[0] is string && exists(/databases/$(database)/documents/rooms/$(gameId)/players/$(request.resource.data.detectiveUids[0]))))
+        && (request.resource.data.detectiveUids.size() < 2 || (request.resource.data.detectiveUids[1] is string && exists(/databases/$(database)/documents/rooms/$(gameId)/players/$(request.resource.data.detectiveUids[1]))))
+        && (request.resource.data.detectiveUids.size() < 3 || (request.resource.data.detectiveUids[2] is string && exists(/databases/$(database)/documents/rooms/$(gameId)/players/$(request.resource.data.detectiveUids[2]))))
+        && (request.resource.data.detectiveUids.size() < 4 || (request.resource.data.detectiveUids[3] is string && exists(/databases/$(database)/documents/rooms/$(gameId)/players/$(request.resource.data.detectiveUids[3]))))
+        && (request.resource.data.detectiveUids.size() < 5 || (request.resource.data.detectiveUids[4] is string && exists(/databases/$(database)/documents/rooms/$(gameId)/players/$(request.resource.data.detectiveUids[4]))))
+        // basic distinctness checks against Mr. X for up to 5
+        && (request.resource.data.detectiveUids.size() < 1 || request.resource.data.detectiveUids[0] != request.resource.data.mrXUid)
+        && (request.resource.data.detectiveUids.size() < 2 || request.resource.data.detectiveUids[1] != request.resource.data.mrXUid)
+        && (request.resource.data.detectiveUids.size() < 3 || request.resource.data.detectiveUids[2] != request.resource.data.mrXUid)
+        && (request.resource.data.detectiveUids.size() < 4 || request.resource.data.detectiveUids[3] != request.resource.data.mrXUid)
+        && (request.resource.data.detectiveUids.size() < 5 || request.resource.data.detectiveUids[4] != request.resource.data.mrXUid)
+        && request.resource.data.turnIndex is int
+        && request.resource.data.playerOrderUids is list;
+
+      allow update, delete: if false;
+    }
+
+    match /roomCodes/{code} {
+      allow get: if isSignedIn();
+      allow list: if false;
+
+      allow create: if isSignedIn()
+        && code.size() == 6
+        && request.resource.data.roomId is string
+        && request.resource.data.createdAtMs is int
+        && request.resource.data.code == code;
+
+      allow update, delete: if false;
+    }
+
+    match /profiles/{uid} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && request.auth.uid == uid;
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
